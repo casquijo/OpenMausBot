@@ -875,6 +875,7 @@ function browserIntegration(botId: string, profile: string | undefined) {
       session,
       encryptionKey: browserEngineEncryptionKey(),
       persistent: profile !== "guest",
+      env: { ...process.env, PATH: augmentedPath() },
     }),
   };
 }

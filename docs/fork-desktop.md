@@ -40,7 +40,7 @@ It replaces the original app; renaming the app does not isolate its data.
    it, compare `shasum -a 256` on the copy with that receipt.
 4. Open the DMG and copy `OpenMausBot.app` into Applications, replacing the old
    app. Launch the installed copy, not the app inside the mounted DMG.
-5. Confirm About shows `0.1.62-hindsight.1`, check the existing bots, and configure
+5. Confirm About shows `0.1.62-hindsight.2`, check the existing bots, and configure
    one bot through **Settings → Memory → Hindsight**. Follow the
    [Hindsight verification steps](hindsight-memory.md).
 
@@ -68,3 +68,16 @@ The existing `smoke-packaged-server.mjs` fixture, pointed at the app's actual
 `node_modules`, all nine spawned proxy paths, MCP initialize/health/drain, and
 browser discovery. Installation, permissions and a live conversation on the
 MacBook remain user acceptance checks. No real Hindsight service was contacted.
+
+### 0.1.62-hindsight.2
+
+Built on 2026-09-07 with the browser/Codex PATH fix from `285a29bc`. The mounted
+DMG passed signature and image-integrity checks; its server contains the fix,
+its UI reports `.2`, and its updater still targets the fork. The two regression
+scenarios also passed against the packaged server itself: both the default
+`codex` command and an absolute CLI path completed a fake turn with browser MCP
+enabled and the user's local binary directory retained in PATH.
+
+Artifact: `release/OpenMausBot-0.1.62-hindsight.2-arm64.dmg`.
+SHA-256: `4b689ba4b23115043de7876be4af2f27517baa3e87abae87dd6718d62751694d`.
+This verification used temporary data; the MacBook installation was not changed.

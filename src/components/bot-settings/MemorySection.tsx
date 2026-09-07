@@ -39,6 +39,7 @@ import { shortPath } from "@/lib/short-path";
 import type { Bot } from "@/state/store";
 import { useDesktopCapabilities } from "../DesktopCapabilities";
 import { inputCls } from "./field";
+import { HindsightCard } from "./HindsightCard";
 
 const buttonCls = "rounded-lg bg-control px-3 py-1.5 text-[13px] text-ink hover:bg-raised-hover disabled:opacity-50";
 const quietButtonCls = "rounded-md px-2 py-1 text-[12.5px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-50";
@@ -331,6 +332,7 @@ export function MemorySection({ bot, active = true }: { bot: Bot; active?: boole
 
       {notice && <div className="text-[12.5px] text-ink-secondary">{notice}</div>}
       {error && <div className="text-[12.5px] text-danger">{error}</div>}
+      <HindsightCard botId={bot.id} />
     </div>
   );
 }

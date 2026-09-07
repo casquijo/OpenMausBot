@@ -155,6 +155,15 @@ import {
 } from "./mcp-registry.ts";
 import { probeMcpServer } from "./mcp-probe.ts";
 import {
+  HindsightError,
+  parseHindsightConfig,
+  recallHindsight,
+  retainHindsight,
+  testHindsightConnection,
+  type StoredHindsightConfig,
+} from "./hindsight.ts";
+import type { HindsightView } from "../shared/hindsight.ts";
+import {
   GROUP_GOAL_MAX_TURNS,
   groupGoalAssignmentKey,
   groupGoalCompletionTurnId,
@@ -459,6 +468,71 @@ function customDomainStatus() {
     supported: !DESKTOP_MANAGED, appPort: PORT, webhookPort: WEBHOOK_PORT,
     serverIpv4: DESKTOP_MANAGED ? null : customDomainIpv4(),
   };
+}
+
+// Secrets stay in private config, never BotRecord, provider env, or SSE.
+type HindsightConnection = {
+  config: StoredHindsightConfig;
+  status: Pick<HindsightView, "connection" | "recall" | "retain">;
+  requests: Set<AbortController>;
+};
+const hindsightConnections = new Map<string, HindsightConnection>();
+for (const [botId, raw] of Object.entries(cfg.hindsightBots ?? {})) {
+  try {
+    hindsightConnections.set(botId, { config: parseHindsightConfig(raw), status: {}, requests: new Set() });
+  } catch {
+    console.error("A saved Hindsight connection is invalid; configure that bot's memory again.");
+  }
+}
+type HindsightTurn = {
+  botId: string;
+  connection: HindsightConnection;
+  controller: AbortController;
+  threadId: string;
+  claimId: string;
+  providerInstanceId: string;
+  turnId?: string;
+  userText: string;
+  timestamp: string;
+};
+const hindsightTurns = new Map<string, HindsightTurn>();
+
+function cancelHindsightTurn(botId: string, threadId?: string) {
+  for (const [id, turn] of hindsightTurns) {
+    if (turn.botId !== botId || (threadId !== undefined && id !== threadId)) continue;
+    hindsightTurns.delete(id);
+    turn.controller.abort();
+    turn.connection.requests.delete(turn.controller);
+  }
+}
+
+function hindsightView(botId: string): HindsightView {
+  const connection = hindsightConnections.get(botId);
+  const config = connection?.config;
+  return {
+    enabled: config?.enabled ?? false,
+    baseUrl: config?.baseUrl ?? "",
+    bankId: config?.bankId ?? "",
+    apiKeyConfigured: Boolean(config?.apiKey),
+    ...connection?.status,
+  };
+}
+
+function hindsightFailure(error: unknown): string {
+  return error instanceof HindsightError ? error.message : "Hindsight is unavailable. Check the connection and try again.";
+}
+
+function persistHindsightConnection(botId: string, config?: StoredHindsightConfig) {
+  const next = { ...cfg.hindsightBots };
+  if (config) next[botId] = config;
+  else delete next[botId];
+  // Persist first: a failed disk write leaves the current connection usable.
+  saveConfig({ hindsightBots: next });
+  cancelHindsightTurn(botId);
+  for (const request of hindsightConnections.get(botId)?.requests ?? []) request.abort();
+  cfg.hindsightBots = next;
+  if (config) hindsightConnections.set(botId, { config, status: {}, requests: new Set() });
+  else hindsightConnections.delete(botId);
 }
 const registry = new ProviderRegistry(BUILT_IN_DRIVERS);
 // Engines installed from Settings live under the data directory and win over
@@ -940,6 +1014,7 @@ function clearDirectTurnDispatch(threadId: string, claimId: string): void {
 function cancelDirectTurnDispatch(botId: string, expectedThreadId?: string): DirectTurnDispatchClaim | null {
   const threadId = expectedThreadId ?? store.bot(botId)?.threadId;
   if (!threadId) return null;
+  cancelHindsightTurn(botId, threadId);
   const claim = directTurnDispatchClaims.get(threadId);
   if (!claim || claim.botId !== botId) return null;
   directTurnDispatchClaims.delete(threadId);
@@ -2735,6 +2810,7 @@ const watchdog = new TurnWatchdog({
   onStall: (turn) => {
     const stalledResourceOwner = turnResourceOwners.get(turn.threadId);
     const stalledGeneration = directTurnGenerationByThread.get(turn.threadId);
+    cancelHindsightTurn(turn.botId, turn.threadId);
     // Room targets carry an invocation identity; only those claims belong
     // to the room grace cleanup added here.
     const stalledVmTarget = groupSpeakers.has(turn.threadId) ? localVmThreadTargets.get(turn.threadId) : undefined;
@@ -3291,6 +3367,16 @@ bus.subscribe((event: RuntimeEvent) => {
   }
 
   switch (event.type) {
+    case "turn.started": {
+      const memory = bot ? hindsightTurns.get(event.threadId) : undefined;
+      if (bot && memory && memory.threadId === event.threadId && memory.providerInstanceId === event.providerInstanceId
+        && directTurnGenerationByThread.get(event.threadId) === memory.claimId) {
+        // Native-session recovery gets a new provider turn id after the
+        // initial dispatch claim is gone, within the same logical turn.
+        memory.turnId = event.turnId;
+      }
+      break;
+    }
     case "session.started":
       if (bot && event.sessionId && event.providerInstanceId) {
         store.setResumeCursor(bot.id, event.providerInstanceId, event.sessionId, event.threadId);
@@ -3674,6 +3760,30 @@ bus.subscribe((event: RuntimeEvent) => {
       if (completedTurnId) store.markTerminalAssistantMessage(event.threadId, completedTurnId);
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
+      const memory = bot ? hindsightTurns.get(event.threadId) : undefined;
+      if (bot && memory && event.turnId && memory.threadId === event.threadId && memory.turnId === event.turnId) {
+        hindsightTurns.delete(event.threadId);
+        // Store has already applied the same redaction the user sees. Do not
+        // send the provider's raw lastReply across an external boundary.
+        const memoryReply = store.messagesFor(event.threadId).findLast((message) =>
+          message.role === "bot" && message.kind === "text" && message.turnId === event.turnId)?.text ?? "";
+        if (event.ok && memoryReply.trim() && !memory.controller.signal.aborted
+          && hindsightConnections.get(bot.id) === memory.connection) {
+          void retainHindsight(memory.connection.config, {
+            botId: bot.id, botName: bot.name, threadId: event.threadId, turnId: event.turnId,
+            userText: memory.userText, assistantText: memoryReply, timestamp: memory.timestamp,
+          }, memory.controller.signal).then(() => {
+            memory.connection.status.retain = { ok: true, at: new Date().toISOString(), message: "Exchange submitted to Hindsight for processing." };
+          }).catch((error) => {
+            if (!memory.controller.signal.aborted) {
+              memory.connection.status.retain = { ok: false, at: new Date().toISOString(), message: hindsightFailure(error) };
+            }
+          }).finally(() => memory.connection.requests.delete(memory.controller));
+        } else {
+          memory.controller.abort();
+          memory.connection.requests.delete(memory.controller);
+        }
+      }
       const lastReported = turnUsage.get(event.threadId);
       turnUsage.delete(event.threadId);
       // group turns run on the room's thread — the speaking bot's task
@@ -4289,23 +4399,24 @@ const MAX_THREADS_OPENED_PER_TURN = 5;
 /** A thread a bot opened on itself gets its first turn exactly the way a
  * person's message would: it runs now if the bot has a free slot, and
  * otherwise waits in the same composer queue, in line behind whatever the
- * bot already has waiting. The only inheritance is `unattended` — a bot
- * nobody is watching does not become watched by opening a thread. */
+ * bot already has waiting. Preserve the bot's authorship as well as
+ * `unattended`: waiting for capacity changes neither. */
 async function startOrQueueOpenedThread(
   botId: string,
   threadId: string,
   text: string,
   unattended: boolean,
+  peerAsk: NonNullable<Message["peerAsk"]>,
 ): Promise<{ state: "running" } | { state: "queued"; position: number } | { state: "failed"; error: string }> {
   // A room turn holds the bot too (startTurn refuses a direct turn during
   // one); the drain's own block check already waits for it, so the words
   // queue here rather than bounce.
   if (botAtThreadCapacity(botId) || activeGroupTurnForBot(botId)) {
-    queueSteeredMessage(botId, threadId, text, { reason: "capacity", unattended });
+    queueSteeredMessage(botId, threadId, text, { reason: "capacity", unattended, peerAsk });
     return { state: "queued", position: queuedThreadPosition(botId, threadId) ?? 1 };
   }
   try {
-    await startTurn(botId, text, { threadId, unattended });
+    await startTurn(botId, text, { threadId, unattended, peerAsk });
     return { state: "running" };
   } catch (error) {
     const why = error instanceof Error ? error.message : String(error);
@@ -4743,6 +4854,7 @@ async function startTurn(
 
   void (async () => {
     try {
+      let hindsightContext = "";
       const integrations: NonNullable<Parameters<typeof instance.adapter.sendTurn>[0]["integrations"]> = {};
       let browser: Awaited<ReturnType<typeof browserIntegration>> = null;
       const selectedSkills = selectBundledSkills(
@@ -5120,6 +5232,42 @@ async function startTurn(
       // its provider turn id. Never overlap a replacement with that ambiguous
       // pre-id window: wait for the old handshake to settle or for its bounded
       // quarantine to expire, then revalidate this exact claim before launch.
+      if (!directTurnClaimIsCurrent(bot.id, dispatchClaimId, threadId)) {
+        throw new DirectTurnSetupCancelled("turn stopped before memory recall");
+      }
+      const memoryConnection = hindsightConnections.get(bot.id);
+      const queuedIds = opts?.excludeMessageIds ? new Set(opts.excludeMessageIds) : null;
+      const queuedMessages = queuedIds ? store.messagesFor(threadId)
+        .filter((message) => queuedIds.has(message.id) && message.role === "user" && message.kind === "text") : undefined;
+      // A mixed queue is one provider exchange. Do not turn the bot's own
+      // opening (or its combined reply) into facts about the person.
+      if (memoryConnection?.config.enabled && commsDepth === 0 && !opts?.peerAsk && !userMessage.peerAsk
+        && !queuedMessages?.some((message) => message.peerAsk)
+        && opts?.automationSource === undefined && !opts?.unattended && !opts?.cardContinuation && !opts?.runOn) {
+        // A drained queue's provider prompt includes reply excerpts. Only
+        // the exact newly appended user messages belong in external memory.
+        const memoryUserText = queuedMessages
+          ? extractTurnImages(queuedMessages
+            .map((message) => message.text ?? "").join("\n\n")).text
+          : resolvedImages.text;
+        cancelHindsightTurn(bot.id, threadId);
+        const controller = new AbortController();
+        memoryConnection.requests.add(controller);
+        const memory: HindsightTurn = {
+          botId: bot.id, connection: memoryConnection, controller, threadId, claimId: dispatchClaimId,
+          providerInstanceId: instanceId, userText: memoryUserText,
+          timestamp: new Date(userMessage.at).toISOString(),
+        };
+        hindsightTurns.set(threadId, memory);
+        try {
+          hindsightContext = await recallHindsight(memoryConnection.config, memoryUserText, controller.signal);
+          if (!controller.signal.aborted) memoryConnection.status.recall = { ok: true, at: new Date().toISOString() };
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            memoryConnection.status.recall = { ok: false, at: new Date().toISOString(), message: hindsightFailure(error) };
+          }
+        }
+      }
       await pendingCancelledProviderHandshakes.waitForClear(threadId);
       if (!markDirectTurnDispatching(bot.id, dispatchClaimId, threadId)) {
         throw new DirectTurnSetupCancelled("turn stopped before dispatch");
@@ -5161,9 +5309,12 @@ async function startTurn(
         { id: "webhook", label: "Webhook provenance", text: opts?.automationSource === "webhook" ? WEBHOOK_PROMPT : "" },
         { id: "mentions", label: "Mentions", text: mentionPrompt(tagged) },
       ]);
+      const recalledContext = hindsightTurns.get(threadId)?.claimId === dispatchClaimId ? hindsightContext : "";
       const dispatch = await guardTurnDispatch(instance.adapter.sendTurn({
         threadId,
-        text: turnText,
+        // Recalled facts are turn context, never persisted as the person's
+        // words or put in system (which controls Claude process reuse).
+        text: recalledContext ? `${recalledContext}\n\n${turnText}` : turnText,
         images: turnImages,
         approvalMode: approvalModeForTurn(bot, commsDepth > 0),
         model,
@@ -5172,7 +5323,7 @@ async function startTurn(
         // the active task's own session — another task's cursor would
         // resume the wrong conversation and defeat the context bubble
         resumeCursor,
-        ...(recoveryText !== undefined ? { recoveryText } : {}),
+        ...(recoveryText !== undefined ? { recoveryText: recalledContext ? `${recalledContext}\n\n${recoveryText}` : recoveryText } : {}),
         transcript,
         system: prompt.text,
         systemStable: prompt.stable,
@@ -5186,6 +5337,8 @@ async function startTurn(
         retireProviderTurn(dispatch.value.turnId);
         throw new DirectTurnSetupCancelled("turn stopped during provider setup");
       }
+      const memory = hindsightTurns.get(threadId);
+      if (memory?.claimId === dispatchClaimId) memory.turnId ??= dispatch.value.turnId;
       bindInternalCapabilityToProviderTurn(threadId, dispatchClaimId, dispatch.value.turnId);
       clearDirectTurnDispatch(threadId, dispatchClaimId);
       // dispatched: the rewind is spent, and the old cursors are dead
@@ -5222,6 +5375,7 @@ async function startTurn(
         drainDelegationWakes();
       }
     } catch (e) {
+      if (hindsightTurns.get(threadId)?.claimId === dispatchClaimId) cancelHindsightTurn(bot.id, threadId);
       clearCancelledProviderHandshake(threadId, `direct:${dispatchClaimId}`);
       clearDirectTurnDispatch(threadId, dispatchClaimId);
       revokeInternalCapabilityGeneration(threadId, dispatchClaimId);
@@ -8292,6 +8446,7 @@ async function reloadProviders() {
   // Every provider process is about to die. Revoke all turn capabilities in
   // one synchronous step before the first teardown await, including room/task
   // threads that are not a bot's default DM.
+  for (const memory of hindsightTurns.values()) cancelHindsightTurn(memory.botId, memory.threadId);
   revokeAllInternalCapabilities();
   const direct = store.bots.flatMap((bot) => store.tasks(bot.id)
     .filter((task) => threadBusy(bot.id, task.threadId))
@@ -9669,7 +9824,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // reads it, so a later turn in that thread never mistakes the
           // request for the person's.
           const opening = `[Thread you opened yourself${sourceTitle ? ` from #${sourceTitle}` : ""}. The request below is your own words, not the person's: do the work here and end with a clear result they can read.]\n\n${message}`;
-          const outcome = await startOrQueueOpenedThread(from.id, task.threadId, opening, isUnattended(from.id, fromThreadId));
+          const unattended = isUnattended(from.id, fromThreadId);
+          const outcome = await startOrQueueOpenedThread(from.id, task.threadId, opening, unattended, {
+            botId: from.id, name: from.name, unattended: unattended || undefined,
+          });
           return json(res, 201, {
             threadId: task.threadId,
             title: task.title,
@@ -12154,6 +12312,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const target = perBotLocalVmTarget(bot.id);
           localVmIdles.get(target.key)?.cancel();
           localVmIdles.delete(target.key);
+          // Deleting a bot only disconnects external memory; the remote bank
+          // is user-owned and is never deleted by this application.
+          if (hindsightConnections.has(bot.id)) persistHindsightConnection(bot.id);
           store.deleteBot(bot.id);
           browserLive.closeForBot(bot.id);
           await forgetTemporaryBrowser(bot.id);
@@ -12390,6 +12551,64 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const visible = wireBot(updated);
       broadcast({ kind: "bot", bot: visible });
       return json(res, 200, { bot: visible });
+    }
+
+    // External memory is an owner-configured connection. New routes remain
+    // admin-only under request-auth; no key is ever part of a bot or event.
+    const hindsightRoute = /^\/api\/bots\/([\w-]+)\/hindsight(\/test)?$/.exec(path);
+    if (hindsightRoute) {
+      const botId = hindsightRoute[1];
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      if (boxLifecycleBusyBots.has(botId)) return json(res, 409, { error: "Wait for this bot's current configuration or deletion to finish." });
+      if (!hindsightRoute[2] && method === "GET") return json(res, 200, hindsightView(botId));
+      if (!hindsightRoute[2] && method === "DELETE") {
+        persistHindsightConnection(botId);
+        return json(res, 200, hindsightView(botId));
+      }
+      if (!hindsightRoute[2] && method === "PUT") {
+        if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+          return json(res, 415, { error: "content-type must be application/json" });
+        }
+        const body = await readBody(req);
+        if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+        if (boxLifecycleBusyBots.has(botId)) return json(res, 409, { error: "Wait for this bot's current configuration or deletion to finish." });
+        let config: StoredHindsightConfig;
+        try {
+          config = parseHindsightConfig(body, hindsightConnections.get(botId)?.config);
+        } catch (error) {
+          return json(res, 400, { error: hindsightFailure(error) });
+        }
+        if (config.baseUrl && config.bankId && [...hindsightConnections].some(([id, entry]) =>
+          id !== botId && entry.config.baseUrl === config.baseUrl && entry.config.bankId === config.bankId)) {
+          return json(res, 409, { error: "This Hindsight bank is already linked to another bot. Choose a separate bank for this bot." });
+        }
+        persistHindsightConnection(botId, config);
+        return json(res, 200, hindsightView(botId));
+      }
+      if (hindsightRoute[2] && method === "POST") {
+        const connection = hindsightConnections.get(botId);
+        if (!connection?.config.baseUrl || !connection.config.bankId) {
+          return json(res, 400, { error: "Save the Hindsight URL and existing bank ID before testing." });
+        }
+        if (connection.requests.size >= 8) return json(res, 429, { error: "Hindsight requests are already in progress. Try again shortly." });
+        const controller = new AbortController();
+        const disconnect = () => { if (!res.writableEnded) controller.abort(); };
+        res.once("close", disconnect);
+        connection.requests.add(controller);
+        try {
+          await testHindsightConnection(connection.config, controller.signal);
+          connection.status.connection = { ok: true, at: new Date().toISOString(), message: "Connected to the existing bank. No memories were written." };
+        } catch (error) {
+          connection.status.connection = { ok: false, at: new Date().toISOString(), message: hindsightFailure(error) };
+        } finally {
+          connection.requests.delete(controller);
+          res.off("close", disconnect);
+        }
+        if (hindsightConnections.get(botId) !== connection) {
+          return json(res, 409, { error: "The Hindsight connection changed during the test. Test the saved connection again." });
+        }
+        return json(res, 200, hindsightView(botId));
+      }
     }
 
     // ── bot memory: MEMORY.md + memory/ topic and log files ──────────────
@@ -12707,6 +12926,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
                 sendId,
                 steered: true,
               });
+              const memory = hindsightTurns.get(threadId);
+              if (memory && memory.threadId === threadId) {
+                memory.userText += `\n\nUser (follow-up): ${extractTurnImages(text).text}`;
+              }
               return { ok: true as const, steered: true as const, threadId, message };
             }
             if (!current.busy) {

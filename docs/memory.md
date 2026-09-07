@@ -1,8 +1,10 @@
 # Bot memory
 
 Every bot keeps notes between tasks. The notes are plain markdown files in a
-folder on the computer running OpenMausBot — nothing is stored anywhere else,
-and you can open, edit, or delete any of it in any editor. **Bot Settings →
+folder on the computer running OpenMausBot, and you can open, edit, or delete
+any of it in any editor. Optional [Hindsight memory](hindsight-memory.md) is a
+separate connection: when enabled, eligible conversations are also sent to the
+configured service and its memory-processing models. **Bot Settings →
 Memory** shows the same files with a gauge of how much of them actually loads,
 an editor that never overwrites something the bot wrote while you were typing,
 and a journal of every change with one-click undo.

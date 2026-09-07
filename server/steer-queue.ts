@@ -42,6 +42,7 @@ interface QueueEntry {
      * thread it opened on itself). The drained turn must inherit that:
      * a queue is a delay, not a person sitting down at the keyboard. */
     unattended?: boolean;
+    peerAsk?: Message["peerAsk"];
   }>;
 }
 
@@ -79,7 +80,7 @@ export function queueSteeredMessage(
   botId: string,
   threadId: string,
   text: string,
-  options: { prompt?: string; replyToId?: string; sendId?: string; reason?: "capacity"; unattended?: boolean } = {},
+  options: { prompt?: string; replyToId?: string; sendId?: string; reason?: "capacity"; unattended?: boolean; peerAsk?: Message["peerAsk"] } = {},
 ): QueuedSteer {
   const id = newId();
   const entry = queues.get(threadId) ?? { botId, items: [] };
@@ -94,6 +95,7 @@ export function queueSteeredMessage(
     sendId: options.sendId,
     reason: options.reason,
     unattended: options.unattended,
+    peerAsk: options.peerAsk,
   });
   queues.set(threadId, entry);
   changed();
@@ -161,6 +163,7 @@ export function drainSteeredMessages(
           replyToId: item.replyToId,
           sendId: item.sendId,
           queueId: item.messageId,
+          peerAsk: item.peerAsk,
         }),
       );
     }

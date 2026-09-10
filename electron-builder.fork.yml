@@ -1,0 +1,14 @@
+# Personal macOS test build. Keep upstream packaging intact for future merges.
+extends: ./electron-builder.yml
+
+mac:
+  # Platform publish takes precedence over the parent's upstream feed.
+  publish:
+    - provider: github
+      owner: casquijo
+      repo: OpenMausBot
+  # Local ad-hoc signing; this is not a notarized Developer ID distribution.
+  identity: "-"
+
+dmg:
+  sign: false

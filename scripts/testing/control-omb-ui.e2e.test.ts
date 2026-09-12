@@ -131,6 +131,7 @@ describe("control-omb ui drives the real renderer", () => {
     const click = (name: string) => ui("click", info.ui, "--name", name);
     const input = `document.querySelector('input[aria-label="OpenAI-compatible API key"]')`;
     const testButton = `[...${input}.parentElement.querySelectorAll('button')].find(b => b.textContent === 'Test')`;
+    const verdict = () => evaluate(`${input}.parentElement.parentElement.querySelector('[role="status"]')?.textContent`);
     const save = () => evaluate(`[...${input}.parentElement.querySelectorAll('button')].find(b => b.textContent === 'Save').click(); true`);
     const type = async (text: string) => {
       await click("OpenAI-compatible API key");
@@ -145,7 +146,7 @@ describe("control-omb ui drives the real renderer", () => {
       window.fetch = (url, init = {}) => {
         if (String(url) === '/api/keys/test') {
           window.keyTests.push(JSON.parse(init.body));
-          return Promise.resolve(Response.json({ ok: true, check: 'authentication', models: [] }));
+          return Promise.resolve(Response.json({ ok: true, check: 'models', models: ['fixture-model'] }));
         }
         if (String(url) === '/api/config' && init.method === 'PUT' && window.rejectKeySave) {
           return Promise.resolve(Response.json({ error: 'Fixture save rejected' }, { status: 503 }));
@@ -165,11 +166,13 @@ describe("control-omb ui drives the real renderer", () => {
     await expect.poll(() => evaluate(`${testButton}?.disabled`)).toBe(false);
     await click("Test");
     await expect.poll(() => evaluate("window.keyTests")).toEqual([{ provider: "openaiCompat" }]);
+    await expect.poll(verdict).toBe("Saved key: Model catalog reachable: fixture-model. Authentication and chat not verified.");
     await type("  fixture-draft-key  ");
     await click("Test");
     await expect.poll(() => evaluate("window.keyTests")).toEqual([
       { provider: "openaiCompat" }, { provider: "openaiCompat", key: "fixture-draft-key" },
     ]);
+    await expect.poll(verdict).toBe("Unsaved key — save it to use it. Model catalog reachable: fixture-model. Authentication and chat not verified.");
     for (const erased of ["", "   "]) {
       await type(erased);
       expect(await evaluate(`${input}.value`)).toBe(erased);
@@ -198,6 +201,7 @@ describe("control-omb ui drives the real renderer", () => {
     await expect.poll(() => evaluate("window.keyTests")).toEqual([
       { provider: "openaiCompat" }, { provider: "openaiCompat", key: "fixture-draft-key" }, { provider: "openaiCompat" },
     ]);
+    await expect.poll(verdict).toBe("Saved key: Model catalog reachable: fixture-model. Authentication and chat not verified.");
     await waitForExit(launched.child, { signal: "SIGINT", graceMs: 30_000 });
     expect(launched.child.exitCode).toBe(0);
     expect(existsSync(info.dataDir)).toBe(false);

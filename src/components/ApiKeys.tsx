@@ -200,6 +200,12 @@ export function ApiKeyRow({
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [verdict, setVerdict] = useState<string | null>(null);
+  const testGeneration = useRef(0);
+
+  useEffect(() => {
+    testGeneration.current++;
+    setVerdict(null);
+  }, [state.config]);
 
   const configured = state.config ? SECTIONS[section].flag(state.config) : false;
   const clearing = !value.trim() && configured;
@@ -209,6 +215,7 @@ export function ApiKeyRow({
     if (saving || (!value.trim() && !configured)) return;
     setSaving(true);
     setError(null);
+    testGeneration.current++;
     const electronSlot = ELECTRON_CREDENTIAL[section];
     setVerdict(null);
     const request = window.ogb?.setCredential && electronSlot
@@ -231,18 +238,23 @@ export function ApiKeyRow({
     if (!testProvider || testing) return;
     setTesting(true);
     setVerdict(null);
+    const generation = ++testGeneration.current;
+    const draft = Boolean(value.trim());
     try {
       // A pasted, unsaved key is tried as typed; otherwise the saved one.
       const result = await api("/api/keys/test", { method: "POST", body: JSON.stringify({ provider: testProvider, ...(value.trim() ? { key: value.trim() } : {}) }) });
+      if (generation !== testGeneration.current) return;
+      const outcome = result.ok
+        ? result.check === "authentication" ? t("keys.testAuthenticated")
+          : result.models?.length ? t("keys.testCatalog", { models: result.models.join(", ") }) : t("keys.testCatalogNoModels")
+        : result.reason === "rejected" ? t("keys.testRejected")
+          : result.reason === "unreachable" ? t("keys.testUnreachable")
+            : t("keys.testUnexpected", { status: String(result.status ?? "?") });
       setVerdict(
-        result.ok
-          ? result.models?.length ? t("keys.testOk", { models: result.models.join(", ") }) : t("keys.testOkNoModels")
-          : result.reason === "rejected" ? t("keys.testRejected")
-            : result.reason === "unreachable" ? t("keys.testUnreachable")
-              : t("keys.testUnexpected", { status: String(result.status ?? "?") }),
+        `${draft ? t("keys.testDraft") : t("keys.testSaved")} ${outcome}`,
       );
     } catch (cause) {
-      setVerdict(cause instanceof Error ? cause.message : String(cause));
+      if (generation === testGeneration.current) setVerdict(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setTesting(false);
     }
@@ -258,14 +270,15 @@ export function ApiKeyRow({
             {t("keys.optional")}
           </span>
         )}
-        {configured && <span className="text-[11px] text-success">{t("keys.connected")}</span>}
+        {configured && <span className="text-[11px] text-ink-secondary">{t("keys.configured")}</span>}
         <CredentialHelp section={section} />
       </div>
       <div className="flex gap-2">
         <input
           type="password"
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => { testGeneration.current++; setVerdict(null); setValue(e.target.value); }}
+          disabled={saving}
           onKeyDown={(e) => e.key === "Enter" && save()}
           placeholder={configured ? t("keys.replace") : credential.placeholder}
           aria-label={credential.label}

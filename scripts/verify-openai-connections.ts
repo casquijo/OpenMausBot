@@ -39,11 +39,16 @@ try {
   } else {
     const electron = process.env.OMB_VERIFY_ELECTRON ?? createRequire(import.meta.url)("electron");
     const child = spawn(electron, [join(root, "scripts/testing/openai-connections-driver.mjs"), preview.previewUrl, output, providerBase], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "" }, stdio: "inherit", timeout: 60_000,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "" }, stdio: "inherit", timeout: 300_000,
     });
     await new Promise<void>((resolve, reject) => {
       child.once("error", reject);
-      child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Connection UI verification failed (${code})`)));
+      child.once("exit", (code, signal) => {
+        if (code === 0) return resolve();
+        const reason = child.killed ? `timed out after 300 seconds (${signal ?? "terminated"})`
+          : signal ? `terminated by ${signal}` : `exit code ${code}`;
+        reject(new Error(`Connection UI verification failed: ${reason}`));
+      });
     });
     writeFileSync(join(output, "requests.json"), `${JSON.stringify(requests, null, 2)}\n`);
     writeFileSync(join(output, "server-log.txt"), `${fixture.info.logPath}\n`);

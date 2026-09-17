@@ -11,7 +11,7 @@ import type { EffortLevel } from "../../shared/wire";
 import type { ModelVariantOption } from "../../shared/runtime-events";
 import { filterCustomModels, partitionCustomModels, suggestedModels } from "@/lib/custom-models";
 import { isCustomOnly, splitEngineRail } from "@/lib/engine-rail";
-import { ProviderMark } from "./ProviderIcons";
+import { InstanceProviderMark } from "./ProviderIcons";
 import { EngineSetup, EngineUpdateNotice, needsCli, needsSignIn } from "./EngineSetup";
 import { EngineGroupLabel } from "./EngineGroupLabel";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -287,7 +287,7 @@ export function ModelEngineRail({ instances, selectedInstance, claudeInstance, o
         title={`${label} · ${engineStatus(target)}`}
         className={cn("relative flex items-center justify-center rounded-lg", instance.driverKind === "openai-compat" ? "min-h-12 w-full flex-col gap-1 py-1" : "size-9", selected ? "bg-control ring-1 ring-hairline/50" : "hover:bg-control/60")}
       >
-        <ProviderMark driverKind={instance.driverKind} size={18} />
+        <InstanceProviderMark instance={target} size={18} />
         {instance.driverKind === "openai-compat" && <span className="line-clamp-2 w-full break-words text-center text-[9px] leading-tight">{instance.displayName}</span>}
         {attention && <span className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full bg-warning ring-2 ring-panel" />}
       </button>
@@ -539,7 +539,7 @@ export function ModelPicker({
           : selection.model
       }
     >
-      {active && <ProviderMark driverKind={active.driverKind} size={14} />}
+      {active && <InstanceProviderMark instance={active} size={14} />}
       {!contained && showActiveAccount && (
         <span data-model-account-compact className="hidden max-w-20 truncate @max-4xl/chathead:inline">{active.displayName}</span>
       )}
@@ -802,7 +802,9 @@ export function ModelPicker({
                   <button
                     type="button"
                     aria-label={
-                      custom.length > 0
+                      apiConnection
+                        ? t("connections.chooseModel")
+                        : custom.length > 0
                         ? t("model.useLocalCount", { count: custom.length })
                         : t("model.useLocal")
                     }
@@ -813,7 +815,7 @@ export function ModelPicker({
                     }}
                     className="flex w-full shrink-0 items-center justify-between gap-2 border-t border-hairline/40 px-4 py-3 text-left text-[12.5px] font-medium text-ink hover:bg-control/60 disabled:cursor-not-allowed disabled:text-ink-secondary/40 disabled:hover:bg-transparent"
                   >
-                    <span>{t("model.useLocal")}</span>
+                    <span>{t(apiConnection ? "connections.chooseModel" : "model.useLocal")}</span>
                     <span className="flex items-center gap-2">
                       {custom.length > 0 && (
                         <span className="rounded-full bg-inset px-2 py-0.5 text-[10.5px] text-ink-secondary">

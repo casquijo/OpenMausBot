@@ -3,7 +3,7 @@ import { closeSync, openSync, readFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, it } from "vitest";
+import { expect, it, onTestFinished } from "vitest";
 import { launchVerificationServer, verificationServerEnvironment } from "../scripts/control-omb.ts";
 import { fixtureApi } from "../scripts/testing/preview-fixture.ts";
 import { waitForExit } from "./testing/cleanup.ts";
@@ -50,8 +50,11 @@ async function provider(name: string) {
 
 it("routes two bots independently, rotates one key while the other runs, and preserves connection and thread selections after restart", async () => {
   const first = await provider("First");
+  onTestFinished(first.close);
   const second = await provider("Second");
+  onTestFinished(second.close);
   const fixture = await launchVerificationServer();
+  onTestFinished(() => fixture.close());
   const api = fixtureApi(fixture.info.url);
   let sse = await openSse(`${fixture.info.url}/api/events`);
   let restarted: ChildProcess | undefined;
@@ -64,6 +67,8 @@ it("routes two bots independently, rotates one key while the other runs, and pre
   try {
     const a = await api("POST", route, { displayName: "First API", url: first.url, auth: "bearer", key: "fixture-first-key", model: "shared-model", tools: false });
     const b = await api("POST", route, { displayName: "Second API", url: second.url, auth: "bearer", key: "fixture-second-key", model: "shared-model", tools: false });
+    const icon = { kind: "preset", preset: "mistral" };
+    await api("PATCH", `/api/instances/${a.instanceId}/icon`, { icon });
     const selectionA = { instanceId: a.instanceId, model: "shared-model" };
     const selectionB = { instanceId: b.instanceId, model: "shared-model" };
     const { bot: botA } = await api("POST", "/api/bots", { name: "API bot A", modelSelection: selectionA });
@@ -109,6 +114,7 @@ it("routes two bots independently, rotates one key while the other runs, and pre
       try { return (await fetch(`${fixture.info.url}/api/health`)).ok; } catch { return false; }
     }, { timeout: 20_000 }).toBe(true);
     const restored = await readBot();
+    expect(JSON.parse(readFileSync(join(fixture.info.dataDir, "config.json"), "utf8")).instances[a.instanceId].icon).toEqual(icon);
     expect(restored.modelSelection).toEqual(selectionB);
     expect(restored.tasks.find((thread: { threadId: string }) => thread.threadId === botA.threadId).modelSelection).toEqual(selectionA);
     expect((await api("GET", route)).connections.filter((connection: { instanceId: string }) => [a.instanceId, b.instanceId].includes(connection.instanceId))).toHaveLength(2);
@@ -126,37 +132,35 @@ it("routes two bots independently, rotates one key while the other runs, and pre
   } finally {
     sse.close();
     if (restarted) await waitForExit(restarted, { signal: "SIGTERM" });
-    await fixture.close();
-    await first.close();
-    await second.close();
   }
 }, 60_000);
 
 it("keeps external keys out of stored config and supports explicit keyless connections and safe deletion", async () => {
   const endpoint = await provider("Storage");
+  onTestFinished(endpoint.close);
   const fixture = await launchVerificationServer();
+  onTestFinished(() => fixture.close());
   const api = fixtureApi(fixture.info.url);
-  try {
-    const external = await api("POST", `${route}?secretStorage=external`, {
-      displayName: "Desktop secret", url: endpoint.url, auth: "bearer", key: "fixture-external-key", model: "shared-model",
-    });
-    const disk = () => JSON.parse(readFileSync(join(fixture.info.dataDir, "config.json"), "utf8"));
-    expect(disk().instances[external.instanceId].config).toMatchObject({ secretStorage: "external", auth: "bearer" });
-    expect(JSON.stringify(disk())).not.toContain("fixture-external-key");
-    await api("PATCH", `${editRoute(external.instanceId)}?secretStorage=external`, { displayName: "Renamed desktop secret" });
-    await api("POST", `${route}/test`, { instanceId: external.instanceId, kind: "response" });
-    expect(endpoint.requests.at(-1)?.key).toBe("Bearer fixture-external-key");
-    const local = await api("POST", route, { displayName: "No authentication", url: endpoint.url, auth: "none", model: "shared-model" });
-    const { connections } = await api("GET", route);
-    expect(connections.find((connection: { instanceId: string }) => connection.instanceId === local.instanceId)).toMatchObject({ auth: "none", configured: true });
-    await api("POST", `${route}/test`, { instanceId: local.instanceId, kind: "response" });
-    expect(endpoint.requests.at(-1)?.key).toBe("");
-    await api("DELETE", editRoute(local.instanceId), {});
-    await api("DELETE", `${editRoute(external.instanceId)}?secretStorage=external`, {});
-    expect(disk().instances[local.instanceId]).toBeUndefined();
-    expect(disk().instances[external.instanceId]).toBeUndefined();
-  } finally {
-    await fixture.close();
-    await endpoint.close();
-  }
+  const external = await api("POST", `${route}?secretStorage=external`, {
+    displayName: "Desktop secret", url: endpoint.url, auth: "bearer", key: "fixture-external-key", model: "shared-model",
+  });
+  const disk = () => JSON.parse(readFileSync(join(fixture.info.dataDir, "config.json"), "utf8"));
+  expect(disk().instances[external.instanceId].config).toMatchObject({ secretStorage: "external", auth: "bearer" });
+  expect(JSON.stringify(disk())).not.toContain("fixture-external-key");
+  const icon = { kind: "preset", preset: "openrouter" };
+  await api("PATCH", `/api/instances/${external.instanceId}/icon`, { icon });
+  await api("PATCH", `${editRoute(external.instanceId)}?secretStorage=external`, { displayName: "Renamed desktop secret" });
+  expect(disk().instances[external.instanceId].icon).toEqual(icon);
+  expect(JSON.stringify(disk())).not.toContain("fixture-external-key");
+  await api("POST", `${route}/test`, { instanceId: external.instanceId, kind: "response" });
+  expect(endpoint.requests.at(-1)?.key).toBe("Bearer fixture-external-key");
+  const local = await api("POST", route, { displayName: "No authentication", url: endpoint.url, auth: "none", model: "shared-model" });
+  const { connections } = await api("GET", route);
+  expect(connections.find((connection: { instanceId: string }) => connection.instanceId === local.instanceId)).toMatchObject({ auth: "none", configured: true });
+  await api("POST", `${route}/test`, { instanceId: local.instanceId, kind: "response" });
+  expect(endpoint.requests.at(-1)?.key).toBe("");
+  await api("DELETE", editRoute(local.instanceId), {});
+  await api("DELETE", `${editRoute(external.instanceId)}?secretStorage=external`, {});
+  expect(disk().instances[local.instanceId]).toBeUndefined();
+  expect(disk().instances[external.instanceId]).toBeUndefined();
 });

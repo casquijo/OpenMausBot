@@ -1,6 +1,7 @@
 // Transcript-replay driver for OpenRouter, Groq, Together, llama.cpp, and
 // other endpoints that speak the OpenAI chat-completions contract.
 import type { ModelCatalog, ProviderDriver } from "../contracts.ts";
+import { normalizeApiUrl } from "../cli-api-setup.ts";
 import { createOpenAIChatRuntime } from "./openai-chat.ts";
 
 const DRIVER_KIND = "openai-compat";
@@ -46,11 +47,11 @@ function decodeConfig(raw: unknown): OpenAICompatConfig {
   const independent = config.auth !== undefined;
   if (independent && (typeof config.url !== "string" || !config.url.trim())) throw new Error("An independent connection requires an API URL");
   const envUrl = independent ? undefined : process.env.OPENAI_COMPAT_URL;
+  const url = (typeof config.url === "string" && config.url ? config.url : envUrl || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
   return {
     ...(independent ? { auth: config.auth as "bearer" | "none" } : {}),
     ...(config.tools !== undefined ? { tools: config.tools as boolean } : {}),
-    url: (typeof config.url === "string" && config.url ? config.url : envUrl || "https://openrouter.ai/api/v1")
-      .replace(/\/+$/, ""),
+    url: independent ? normalizeApiUrl(url) : url,
     apiKeyEnv: typeof config.apiKeyEnv === "string" && config.apiKeyEnv
       ? config.apiKeyEnv
       : "OPENAI_COMPAT_API_KEY",

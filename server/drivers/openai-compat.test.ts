@@ -71,6 +71,12 @@ describe("OpenAICompatDriver", () => {
     }
   });
 
+  it.each(["bearer", "none"])("validates independent %s endpoints when loading saved configuration", (auth) => {
+    expect(() => OpenAICompatDriver.decodeConfig({ auth, url: "http://provider.example/v1" })).toThrow(/HTTPS/);
+    expect(OpenAICompatDriver.decodeConfig({ auth, url: "https://provider.example/v1/" }).url).toBe("https://provider.example/v1");
+    expect(OpenAICompatDriver.decodeConfig({ auth, url: "http://127.0.0.1:1234/v1" }).url).toBe("http://127.0.0.1:1234/v1");
+  });
+
   it("never uses global credentials when an independent connection has no key", async () => {
     process.env.OPENAI_COMPAT_API_KEY = "global-secret";
     const fetch = vi.fn();
@@ -134,6 +140,37 @@ describe("OpenAICompatDriver", () => {
       expect(init?.redirect).toBe("error");
     }
     for (const inst of instances) await inst.dispose();
+  });
+
+  it.each(["bearer", "none"])("cancels helper generation on the caller signal for %s connections", async (auth) => {
+    let requestStarted!: (signal: AbortSignal) => void;
+    const started = new Promise<AbortSignal>((resolve) => { requestStarted = resolve; });
+    vi.stubGlobal("fetch", vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      if (String(input).endsWith("/models")) return new Response(JSON.stringify({ data: [] }));
+      expect(new Headers(init?.headers).get("authorization")).toBe(auth === "bearer" ? "Bearer own-key" : null);
+      const signal = init?.signal;
+      if (!signal) throw new Error("Helper request must be cancellable");
+      requestStarted(signal);
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }));
+    const instance = await OpenAICompatDriver.create({
+      instanceId: "helper", displayName: "Helper", enabled: true,
+      config: OpenAICompatDriver.decodeConfig({ auth, url: "https://own.example/v1", key: "own-key", model: "own/model" }),
+      environment: {},
+    });
+    const caller = new AbortController();
+    try {
+      const result = expect(instance.generateText?.("Create a title", { signal: caller.signal })).rejects.toThrow("Helper cancelled");
+      const requestSignal = await started;
+      caller.abort(new Error("Helper cancelled"));
+      await result;
+      expect(requestSignal.aborted).toBe(true);
+    } finally {
+      caller.abort();
+      await instance.dispose();
+    }
   });
 
   it("reports unavailable without an API key", async () => {

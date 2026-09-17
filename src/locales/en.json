@@ -2270,5 +2270,18 @@
   "connections.noModelsHint": "Refresh the catalog, or set a default model in this connection’s settings.",
   "connections.erasedKey": "Enter a replacement key, or cancel and reopen to keep the saved key.",
   "connections.savedKey": "Saved key:",
-  "connections.unsavedKey": "Unsaved key — save it to use it."
+  "connections.unsavedKey": "Unsaved key — save it to use it.",
+  "engines.icon.label": "Provider icon",
+  "engines.icon.selectAria": "Provider icon for {name}",
+  "engines.icon.default": "Default icon",
+  "engines.icon.custom": "Custom image",
+  "engines.icon.saving": "Saving provider icon",
+  "engines.icon.reset": "Reset",
+  "engines.icon.help": "Choose a provider or upload a square PNG, JPEG, or WebP image up to 128 KB. This changes only this engine instance.",
+  "engines.icon.uploadAria": "Upload a custom provider icon for {name}",
+  "engines.icon.decodeError": "OpenMausBot could not decode that image.",
+  "engines.icon.formatError": "Upload a PNG, JPEG, or WebP image.",
+  "engines.icon.sizeError": "Provider icons must be 128 KB or smaller.",
+  "engines.icon.invalidError": "Upload a complete PNG, JPEG, or WebP image up to 128 KB and {dimension} × {dimension} pixels.",
+  "engines.icon.dimensionError": "Provider icons must be at most {dimension} × {dimension} pixels."
 }

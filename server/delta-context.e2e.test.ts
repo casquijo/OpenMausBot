@@ -934,12 +934,14 @@ it.skipIf(process.platform === "win32")("gives a delegated return today's fresh 
 }), 90_000);
 
 it("gives a delegate_bot source today's fresh session and replay when its soul changed since the session started", () => fixture(async (f) => {
+  f.plan[f.qa.id] = { reply: "QA_SOUL_TOKEN", gateFile: f.gate("qa") };
+  f.plan[f.ops.id] = { reply: "OPS_SOUL_TOKEN", gateFile: f.gate("ops") };
   f.plan[f.chief.id] = { turns: [
     { steps: [
       { tool: "delegate_bot", arguments: { bot_id: f.qa.id, message: "Check the quality: QA_SOUL_TOKEN" } },
       { tool: "delegate_bot", arguments: { bot_id: f.ops.id, message: "Check operations: OPS_SOUL_TOKEN" } },
     ], reply: "Delegated" },
-    { reply: "First reply folded in", gateFile: f.gate("revival") },
+    { progress: "First revival received its context", reply: "First reply folded in", gateFile: f.gate("revival") },
     { reply: "Second reply folded in" },
   ] };
   f.save();
@@ -951,6 +953,10 @@ it("gives a delegate_bot source today's fresh session and replay when its soul c
   let threadId = "";
   await expect.poll(async () => (threadId = (await f.api("/api/routines")).runs.find((r: any) => r.id === run.id)?.threadId ?? ""), { timeout: 15_000 }).not.toBe("");
   // The first reply wakes the source; the second lands while that turn holds.
+  // Wait for output from that turn so its prompt cannot consume both replies.
+  f.open(f.gate("qa"));
+  await expect.poll(async () => (await f.messages(threadId)).some((m: any) => m.text === "First revival received its context"), { timeout: 30_000 }).toBe(true);
+  f.open(f.gate("ops"));
   const replies = async () => (await f.messages(threadId)).filter((m: any) => /^@(QA|Ops) replied to the delegated task/.test(m.text ?? "")).length;
   await expect.poll(replies, { timeout: 30_000 }).toBe(2);
   await f.api(`/api/bots/${f.chief.id}`, { soul: "PEER_SOUL_MARK Always answer in German." }, "PATCH");
@@ -958,11 +964,12 @@ it("gives a delegate_bot source today's fresh session and replay when its soul c
   await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
 
   const [, first, third] = f.turns();
-  const late = count(f.prompt(first), "QA_SOUL_TOKEN") ? "OPS_SOUL_TOKEN" : "QA_SOUL_TOKEN";
+  expect(count(f.prompt(first), "QA_SOUL_TOKEN")).toBe(1);
+  expect(f.prompt(first)).not.toContain("OPS_SOUL_TOKEN");
   expect(third.system).toContain("PEER_SOUL_MARK");
   expect(f.launches().at(-1).resume).toBeNull();
   expect(f.prompt(third)).toContain("received an update outside your provider session");
-  expect(count(f.prompt(third), late)).toBe(1);
+  expect(count(f.prompt(third), "OPS_SOUL_TOKEN")).toBe(1);
 }), 120_000);
 
 // ── Settings a resumed session cannot take on ──

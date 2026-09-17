@@ -21,6 +21,8 @@ const DEFAULT_MODELS: ModelCatalog = {
 
 export interface OpenAICompatConfig {
   tools?: boolean;
+  /** Present for independent connections; absence retains legacy environment defaults. */
+  auth?: "bearer" | "none";
   url: string;
   apiKeyEnv: string;
   key?: string;
@@ -40,8 +42,12 @@ function isOpenRouterUrl(url: string): boolean {
 function decodeConfig(raw: unknown): OpenAICompatConfig {
   const config = (raw ?? {}) as Record<string, unknown>;
   if (config.tools !== undefined && typeof config.tools !== "boolean") throw new Error("tools must be a boolean");
-  const envUrl = process.env.OPENAI_COMPAT_URL;
+  if (config.auth !== undefined && config.auth !== "bearer" && config.auth !== "none") throw new Error("auth must be bearer or none");
+  const independent = config.auth !== undefined;
+  if (independent && (typeof config.url !== "string" || !config.url.trim())) throw new Error("An independent connection requires an API URL");
+  const envUrl = independent ? undefined : process.env.OPENAI_COMPAT_URL;
   return {
+    ...(independent ? { auth: config.auth as "bearer" | "none" } : {}),
     ...(config.tools !== undefined ? { tools: config.tools as boolean } : {}),
     url: (typeof config.url === "string" && config.url ? config.url : envUrl || "https://openrouter.ai/api/v1")
       .replace(/\/+$/, ""),
@@ -51,13 +57,21 @@ function decodeConfig(raw: unknown): OpenAICompatConfig {
     key: typeof config.key === "string" && config.key ? config.key : undefined,
     model: typeof config.model === "string" && config.model
       ? config.model
-      : process.env.OPENAI_COMPAT_MODEL || undefined,
+      : independent ? undefined : process.env.OPENAI_COMPAT_MODEL || undefined,
     // An explicit empty override disables inherited routing for an isolated
     // connection (CLI setup uses this). Absent still inherits the global pin.
     provider: typeof config.provider === "string"
       ? config.provider || undefined
-      : process.env.OPENAI_COMPAT_PROVIDER || undefined,
+      : independent ? undefined : process.env.OPENAI_COMPAT_PROVIDER || undefined,
   };
+}
+
+/** Resolve exactly the credential the runtime sends, without making a request. */
+export function resolveOpenAICompatKey(config: OpenAICompatConfig, environment: Record<string, string>): string {
+  if (config.auth === "none") return "";
+  if (config.auth === "bearer") return config.key ?? "";
+  return config.key ?? environment[config.apiKeyEnv] ?? environment.OPENAI_COMPAT_API_KEY
+    ?? process.env[config.apiKeyEnv] ?? process.env.OPENAI_COMPAT_API_KEY ?? "";
 }
 
 export const OpenAICompatDriver: ProviderDriver<OpenAICompatConfig> = {
@@ -86,14 +100,14 @@ export const OpenAICompatDriver: ProviderDriver<OpenAICompatConfig> = {
 
   async create(input) {
     const { config } = input;
-    const apiKey =
-      config.key ??
-      input.environment[config.apiKeyEnv] ??
-      input.environment.OPENAI_COMPAT_API_KEY ??
-      process.env[config.apiKeyEnv] ??
-      process.env.OPENAI_COMPAT_API_KEY ??
-      "";
-    let catalog: ModelCatalog = config.model
+    const apiKey = resolveOpenAICompatKey(config, input.environment);
+    const configured = config.auth === "none" || !!apiKey;
+    const missingKey = config.auth === "bearer"
+      ? "no API key — add one to this connection"
+      : `no API key — set ${config.apiKeyEnv} or add it to the instance config`;
+    let catalog: ModelCatalog = config.auth !== undefined
+      ? { default: config.model ?? "", options: config.model ? [{ id: config.model, label: config.model, custom: true }] : [] }
+      : config.model
       ? {
           default: config.model,
           options: DEFAULT_MODELS.options.some((model) => model.id === config.model)
@@ -103,10 +117,11 @@ export const OpenAICompatDriver: ProviderDriver<OpenAICompatConfig> = {
       : DEFAULT_MODELS;
 
     const fetchModels = async () => {
-      if (!apiKey) return;
+      if (!configured) return;
       try {
         const response = await fetch(`${config.url}/models`, {
-          headers: { authorization: `Bearer ${apiKey}` },
+          headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+          redirect: "error",
           signal: AbortSignal.timeout(8_000),
         });
         if (!response.ok) return;
@@ -133,12 +148,13 @@ export const OpenAICompatDriver: ProviderDriver<OpenAICompatConfig> = {
         // Catalog refresh is opportunistic; keep the seeded options.
       }
     };
-    if (apiKey) void fetchModels();
+    if (configured) void fetchModels();
 
     return createOpenAIChatRuntime({
       input,
       driverKind: DRIVER_KIND,
       apiKey,
+      allowUnauthenticated: config.auth === "none",
       apiUrl: config.url,
       tools: config.tools,
       models: () => catalog,
@@ -153,8 +169,8 @@ export const OpenAICompatDriver: ProviderDriver<OpenAICompatConfig> = {
           : {}),
       }),
       httpErrorLabel: "upstream",
-      missingKeyError: `no API key — set ${config.apiKeyEnv} or add it to the instance config`,
-      unavailableReason: `no API key — set ${config.apiKeyEnv} or add it to the instance config`,
+      missingKeyError: missingKey,
+      unavailableReason: missingKey,
       timeoutMs: idleTimeoutMs(),
       reasoning: true,
       billing: "metered",

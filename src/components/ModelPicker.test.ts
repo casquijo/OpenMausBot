@@ -319,3 +319,22 @@ describe("Claude provider and account selection", () => {
     expect(onSelect).toHaveBeenCalledExactlyOnceWith(personal);
   });
 });
+
+describe("named OpenAI-compatible connections", () => {
+  const personal: InstanceInfo = { ...engine(), instanceId: "api-personal", driverKind: "openai-compat", displayName: "Personal provider" };
+  const work: InstanceInfo = { ...engine(), instanceId: "api-work", driverKind: "openai-compat", displayName: "Work provider" };
+
+  it("visibly distinguishes connections even when they share the same driver and model", () => {
+    const rail = renderToStaticMarkup(createElement(ModelEngineRail, { instances: [personal, work], selectedInstance: work, onSelect: vi.fn() }));
+    expect(rail).toContain('aria-label="Work provider" aria-pressed="true"');
+    expect(rail).toContain(">API<");
+    expect(rail).not.toContain(">Local<");
+    expect(rail).toMatch(/<span[^>]*>Personal provider<\/span>/);
+    expect(rail).toMatch(/<span[^>]*>Work provider<\/span>/);
+    fixture.instances = [personal, work];
+    const trigger = renderToStaticMarkup(createElement(ModelPicker, { bot: { ...bot(), modelSelection: { instanceId: work.instanceId, model: "gpt-5.6" } } }));
+    expect(trigger).toMatch(/<span data-model-account[^>]*>Work provider · <\/span>/);
+    expect(trigger).toContain('data-model-account-compact="true"');
+    expect(trigger).not.toContain("@max-4xl/chathead:size-[30px]");
+  });
+});
